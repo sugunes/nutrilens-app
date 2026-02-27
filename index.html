@@ -1201,12 +1201,10 @@
       <textarea class="text-input" id="foodTextInput" rows="2" placeholder="Örn: 2 dilim tam buğday ekmek, tereyağlı..."></textarea>
     </div>
 
-    <!-- API Key -->
+    <!-- Günlük limit göstergesi -->
     <div class="api-section" id="apiSection">
-      <div class="api-section-title">🔑 Anthropic API Anahtarı</div>
-      <div class="api-note">Ücretsiz analiz için API anahtarına ihtiyacın var. <strong style="color:var(--accent)">console.anthropic.com</strong> adresinden alabilirsin.</div>
-      <input type="password" class="text-input" id="apiKeyInput" placeholder="sk-ant-..." style="margin:0">
-      <div style="font-size:11px;color:var(--muted);margin-top:8px">Anahtar cihazında saklanır, hiçbir yere gönderilmez.</div>
+      <div class="api-section-title">✨ Ücretsiz Kullanım</div>
+      <div class="api-note">Bugün <strong id="freeUsageCount" style="color:var(--accent)">3</strong> ücretsiz analizin kaldı. Premium'a geç → sınırsız analiz!</div>
     </div>
 
     <!-- Error -->
@@ -1335,11 +1333,8 @@ function init() {
   // Set streak
   document.getElementById('streakCount').textContent = state.streak || 1;
 
-  // API key status
-  if (state.apiKey) {
-    document.getElementById('apiKeyStatus').textContent = 'Ayarlandı ✓';
-    document.getElementById('apiKeyInput').value = state.apiKey;
-  }
+  // Update usage display
+  updateUsageDisplay();
 
   updateUI();
   renderWeekBars();
@@ -1484,25 +1479,40 @@ function removeImage() {
 }
 
 // ===================== AI ANALYSIS =====================
+const FREE_LIMIT = 3; // günlük ücretsiz analiz
+
+function getTodayUsage() {
+  const key = 'nutrilens_usage_' + getTodayKey();
+  return parseInt(localStorage.getItem(key) || '0');
+}
+
+function incrementUsage() {
+  const key = 'nutrilens_usage_' + getTodayKey();
+  const val = getTodayUsage() + 1;
+  localStorage.setItem(key, val);
+  updateUsageDisplay();
+}
+
+function updateUsageDisplay() {
+  const remaining = Math.max(0, FREE_LIMIT - getTodayUsage());
+  const el = document.getElementById('freeUsageCount');
+  if (el) el.textContent = remaining;
+}
+
 async function analyzeFood() {
-  const apiKey = document.getElementById('apiKeyInput').value.trim() || state.apiKey;
   const foodText = document.getElementById('foodTextInput').value.trim();
   const errorBox = document.getElementById('errorBox');
-
-  if (!apiKey) {
-    showError('API anahtarı gerekli. Lütfen Anthropic API anahtarınızı girin.');
-    return;
-  }
 
   if (!selectedFile && !foodText) {
     showError('Lütfen bir fotoğraf seç veya yemek adı yaz.');
     return;
   }
 
-  // Save API key
-  state.apiKey = apiKey;
-  save();
-  document.getElementById('apiKeyStatus').textContent = 'Ayarlandı ✓';
+  // Günlük limit kontrolü
+  if (getTodayUsage() >= FREE_LIMIT && !state.isPremium) {
+    showError('Günlük ücretsiz limitini doldurdun (3 analiz). Premium\'a geçerek sınırsız analiz yapabilirsin!');
+    return;
+  }
 
   errorBox.classList.remove('show');
   document.getElementById('loadingState').classList.add('show');
@@ -1518,16 +1528,8 @@ async function analyzeFood() {
       messages = [{
         role: 'user',
         content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: mediaType, data: base64 }
-          },
-          {
-            type: 'text',
-            text: foodText
-              ? `Bu yemek fotoğrafını analiz et. Ek not: ${foodText}. JSON formatında yanıt ver.`
-              : 'Bu yemek fotoğrafını analiz et. JSON formatında yanıt ver.'
-          }
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+          { type: 'text', text: foodText ? `Bu yemek fotoğrafını analiz et. Ek not: ${foodText}. JSON formatında yanıt ver.` : 'Bu yemek fotoğrafını analiz et. JSON formatında yanıt ver.' }
         ]
       }];
     } else {
@@ -1537,53 +1539,20 @@ async function analyzeFood() {
       }];
     }
 
-    const systemPrompt = `Sen bir diyetisyen ve kalori uzmanısın. Kullanıcı sana yemek görseli veya ismi verdiğinde, kalori ve makro besin değerlerini JSON olarak döndür.
-    
-Kesinlikle sadece geçerli JSON döndür, başka hiçbir şey yazma. Format:
-{
-  "name": "Yemek adı (Türkçe)",
-  "emoji": "uygun emoji",
-  "portion": "porsiyon bilgisi",
-  "calories": sayı,
-  "protein": sayı (gram),
-  "carbs": sayı (gram),
-  "fat": sayı (gram),
-  "notes": "kısa besin notu (1-2 cümle Türkçe)"
-}`;
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    // Backend'e gönder — API anahtarı kullanıcıya görünmez!
+    const response = await fetch('/api/analyze', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-opus-4-6',
-        max_tokens: 500,
-        system: systemPrompt,
-        messages: messages
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages })
     });
 
     if (!response.ok) {
       const err = await response.json();
-      throw new Error(err.error?.message || 'API hatası: ' + response.status);
+      throw new Error(err.error || 'Sunucu hatası: ' + response.status);
     }
 
-    const data = await response.json();
-    const text = data.content[0].text.trim();
-
-    // Parse JSON
-    let result;
-    try {
-      const clean = text.replace(/```json|```/g, '').trim();
-      result = JSON.parse(clean);
-    } catch(e) {
-      throw new Error('AI yanıtı işlenemedi. Lütfen tekrar dene.');
-    }
-
+    const result = await response.json();
+    incrementUsage();
     currentResult = result;
     showResult(result);
 
